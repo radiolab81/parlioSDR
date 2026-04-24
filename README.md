@@ -53,6 +53,8 @@ echo -n "width 8" | nc -w 1 192.168.1.71 5000
 #### set 16 bit dac width
 echo -n "width 16" | nc -w 1 192.168.1.71 5000
 
+Apps like COHIRADIAStreamer (https://github.com/radiolab81/COHIRADIAStreamer) will do the config on-the-fly.
+
 The pin assignment of the header to the DAC (or ADC) is shown in th esp32_p4_***.h files.
 
 
