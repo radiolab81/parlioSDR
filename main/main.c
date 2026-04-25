@@ -193,6 +193,8 @@ void control_task(void *pv) {
 
             // Wenn sich Parameter geändert haben, PARLIO aktualisieren
             if (changed) {
+                if (current_width != 8) current_width = 16;
+                
                 ESP_LOGI(TAG, "Control Befehl empfangen, rekonfiguriere PARLIO...");
                 if (current_rate * current_width == 80.0) {
                    ESP_LOGI(TAG, "Grenzbereich 100 MBit Ethernet...");
