@@ -14,4 +14,4 @@ By utilizing a dedicated FPGA (such as Lattice iCE40, Gowin Tang Nano, or Altera
 
     3. RF Output: The FPGA directly drives the external high-speed DACs and ADCs.
 
-Note: This Verilog DSP core shares its DNA with our sister-project smiSDR (for the Raspberry Pi). Only the bus-interface wrapper changes, ensuring highly maintained, tested, and portable open-source gateware!
+Note: This Verilog DSP core shares its DNA with our sister-project smiSDR (for the Raspberry Pi). Only the bus-interface wrapper changes, ensuring highly maintained, tested, and portable open-source gateware! So for more details, visit: https://github.com/radiolab81/smisdr/tree/main/gateware
