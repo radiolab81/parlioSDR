@@ -57,4 +57,6 @@ Apps like COHIRADIAStreamer (https://github.com/radiolab81/COHIRADIAStreamer) wi
 
 The pin assignment of the header to the DAC (or ADC) is shown in esp32_p4_***.h files.
 
+## Using with GNU Radio
 
+parlioSDR shares its DNA with our sister-project smiSDR (for the Raspberry Pi), so see https://github.com/radiolab81/smisdr#using-with-gnu-radio
