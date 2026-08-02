@@ -184,11 +184,17 @@ void control_task(void *pv) {
             bool changed = false;
 
             if (strncmp(cmd, "rate ", 5) == 0) {
-                current_rate = atof(cmd + 5);
-                changed = true;
+                float val = atof(cmd + 5);
+                if (val > 0.1f && val <= 40.0f) { // Plausibilitätsprüfung!
+                    current_rate = val;
+                    changed = true;
+                }
             } else if (strncmp(cmd, "width ", 6) == 0) {
-                current_width = atoi(cmd + 6);
-                changed = true;
+                int w = atoi(cmd + 6);
+                if (w == 8 || w == 16) {
+                    current_width = w;
+                    changed = true;
+                }
             }
 
             // Wenn sich Parameter geändert haben, PARLIO aktualisieren
