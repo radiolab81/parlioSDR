@@ -60,3 +60,41 @@ The pin assignment of the header to the DAC (or ADC) is shown in esp32_p4_***.h 
 ## Using with GNU Radio
 
 parlioSDR shares its DNA with our sister-project smiSDR (for the Raspberry Pi), so see https://github.com/radiolab81/smisdr#using-with-gnu-radio
+
+
+## ⚠️ Chip Revision Compatibility Notice
+
+The pre-built HEX release binaries in this repository were compiled several months ago,
+when only **ESP32-P4 Engineering Samples** were available on the market. Since then,
+Espressif has shipped a number of newer mass-production revisions of the ESP32-P4.
+
+The included `sdkconfig` reflects this: it explicitly pins the build to early silicon!
+
+ESP32-P4 revisions **v3.0 and later involve more than 50 hardware and register-level
+changes** (ISP, CPU, L2MEM, MSPI, security modules, etc.) and are **not binary-compatible**
+with firmware built for earlier revisions. A HEX image built for one side of this
+boundary will simply refuse to boot — or behave unpredictably — on the other.
+
+In addition, the current `sdkconfig` caps the CPU clock at
+`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=360` instead of the full 400 MHz that the production
+silicon supports, which was a conservative default appropriate for early ES chips.
+
+**If you are using a recently purchased ESP32 P4 board, do not flash the
+pre-built HEX files blindly.** Instead:
+
+1. Check your actual chip revision (`esptool.py chip-id` or ESP-IDF boot log output).
+2. Rebuild the project yourself using **ESP-IDF 6.1** or later.
+3. Run `idf.py menuconfig` and verify/adjust:
+   - **Component config → Hardware Settings → Chip revision** (min/max revision range)
+   - **Component config → ESP System Settings → CPU frequency** (raise to 400 MHz if
+     your revision supports it)
+4. Since this project depends on sustained network throughput, also review the lwIP
+   settings under **Component config → LWIP → TCP** — in particular
+   `LWIP_TCP_WND_DEFAULT`, `LWIP_TCP_SND_BUF_DEFAULT`, `LWIP_MAX_ACTIVE_TCP`, and
+   `LWIP_TCPIP_RECVMBOX_SIZE`. These currently sit at generic ESP-IDF defaults, which
+   are not necessarily tuned for continuous streaming and should be
+   verified/increased for your target data rate.
+
+We cannot guarantee that the current sdkconfig will produce a stable network stack on
+newer chip revisions, and a fresh build against your specific hardware is strongly
+recommended over reusing the provided binaries!
