@@ -14,7 +14,7 @@ Although Espressif's new microcontrollers (S31 ...) are Gigabit-capable and can 
 
 The parlioSDR represents a very cost-effective approach/replacement to the obsolete FL2000 USB-VGA adapter (8-bit only) in some cases. Usable DACs range from simple 8-10 bit R2R-ladder-DACs to common 12-14 bit parallel-DACs (and ADCs) from manufacturers like Analog, Microchip, or TI. The ability to easily build your own HATs with the desired bit width provides access to all frequency ranges within signal bandwidth corresponding to the PARLIO-Interface.
 
-The project is build with actual ESP-IDF 6.1, so this few lines can do the job
+The project is build with actual ESP-IDF 6.1, so this few lines can do the job (provided that the correct chip revision and CPU clock frequency for your board are set in “menuconfig”; PSRAM is enabled; and the correct header file containing your board's pin assignment has been selected in main.c)
 
 ```console
 idf.py build
