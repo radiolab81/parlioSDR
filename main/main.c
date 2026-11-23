@@ -107,21 +107,85 @@ void init_ethernet(void) {
 
 // --- PARLIO ---
 
-void update_parlio_settings(float msps, int width) {
-    xSemaphoreTake(config_mutex, portMAX_DELAY);
-    
+/* BEGIN PARLIO-BLOCK */
+
+// --- PARLIO-TAKTAUSWAHL ---------------------------------------------------------
+// Der Ausgangstakt des PARLIO-TX entsteht durch Teilung des Quelltakts. Der Teiler
+// hat einen ganzzahligen Anteil von maximal 256 (assert in _parlio_ll_tx_set_clock_div,
+// parlio_ll.h: clk_div->integer <= PARLIO_LL_RX_MAX_CLK_INT_DIV). Mit PLL_F160M (160 MHz)
+// sind deshalb nur Raten ab ca. 0.625 MSPS moeglich (gemessen: 0.7 laeuft, 0.6 -> assert).
+// Darum wird die Quelle je nach Rate gewaehlt:
+//   1. PLL_F160M wie bisher, solange der Teiler <= PARLIO_MAX_DIV ist
+//      (alle bisher funktionierenden Raten bleiben unveraendert)
+//   2. sonst XTAL (40 MHz): Teiler bis 255 -> Raten ab ca. 0.157 MSPS
+// Die Bus-Raten des COHI-Players im I/Q-Modus (2 x Samplerate): 0.5 / 1.0 / 2.5 MSPS
+// teilen 40 MHz ganzzahlig (Teiler 80 / 40 / 16).
+#define PARLIO_PLL_HZ    160000000u
+#define PARLIO_XTAL_HZ    40000000u
+#define PARLIO_MAX_DIV   255.0     // Hardware-Grenze 256, ein Schritt Reserve
+#define PARLIO_MAX_MSPS   40.0     // maximaler IO-Takt
+
+typedef struct {
+    parlio_clock_source_t src;
+    const char *name;
+    double div;
+} parlio_clk_plan_t;
+
+static uint32_t parlio_msps_to_hz(float msps) {
+    return (uint32_t)((double)msps * 1000000.0 + 0.5);
+}
+
+// Kleinste moegliche Rate in MSPS (XTAL, maximaler Teiler)
+static double parlio_min_msps(void) {
+    return (double)PARLIO_XTAL_HZ / PARLIO_MAX_DIV / 1000000.0;
+}
+
+// Waehlt Taktquelle und berechnet den Teiler; false = Rate nicht erzeugbar.
+static bool parlio_plan_clock(uint32_t freq_hz, parlio_clk_plan_t *plan) {
+    if (freq_hz == 0 || freq_hz > (uint32_t)(PARLIO_MAX_MSPS * 1000000.0)) return false;
+
+    double div_pll  = (double)PARLIO_PLL_HZ  / (double)freq_hz;
+    double div_xtal = (double)PARLIO_XTAL_HZ / (double)freq_hz;
+    parlio_clk_plan_t p;
+
+    if (div_pll >= 1.0 && div_pll <= PARLIO_MAX_DIV) {
+        p.src = PARLIO_CLK_SRC_PLL_F160M; p.name = "PLL_F160M"; p.div = div_pll;
+    } else if (div_xtal >= 1.0 && div_xtal <= PARLIO_MAX_DIV) {
+        p.src = PARLIO_CLK_SRC_XTAL;      p.name = "XTAL";      p.div = div_xtal;
+    } else {
+        return false;
+    }
+    if (plan) *plan = p;
+    return true;
+}
+
+// Letzte Einstellung, mit der die Hardware nachweislich lief (Rueckfall bei Fehlern)
+static float last_good_rate = 0.0f;
+static int   last_good_width = 0;
+
+// Baut die TX-Einheit mit den angegebenen Werten neu auf. Gibt einen Fehlercode zurueck
+// statt abzubrechen. Wird eine ungueltige Rate erkannt, bevor die laufende Einheit
+// angefasst wird, laeuft die bisherige Einstellung unveraendert weiter.
+// Aufruf nur mit gehaltenem config_mutex.
+static esp_err_t parlio_apply(float msps, int width) {
+    // Umrechnung von Mega-Samples in Hertz und Wahl der Taktquelle - VOR dem Abbau
+    uint32_t freq_hz = parlio_msps_to_hz(msps);
+    parlio_clk_plan_t plan;
+    if (!parlio_plan_clock(freq_hz, &plan)) {
+        ESP_LOGE(TAG, "Rate %.3f MSPS nicht erzeugbar (erlaubt: %.3f ... %.1f MSPS)",
+                 msps, parlio_min_msps(), PARLIO_MAX_MSPS);
+        return ESP_ERR_INVALID_ARG;
+    }
+
     if (tx_unit != NULL) {
         parlio_tx_unit_disable(tx_unit);
         parlio_del_tx_unit(tx_unit);
-        tx_unit = NULL; // Wichtig, nach Löschung nullen!
+        tx_unit = NULL; // Wichtig, nach Loeschung nullen!
     }
-
-    // Umrechnung von Mega-Samples in Hertz
-    uint32_t freq_hz = (uint32_t)(msps * 1000000.0f);
 
     // Dynamische Konfiguration (ohne #ifdef)
     parlio_tx_unit_config_t unit_config = {
-        .clk_src = PARLIO_CLK_SRC_PLL_F160M,
+        .clk_src = plan.src,
         .data_width = (uint32_t)width,
         .clk_out_gpio_num = DAC_CLK_PIN,
         .clk_in_gpio_num = ADC_CLK_PIN,
@@ -131,8 +195,7 @@ void update_parlio_settings(float msps, int width) {
         .max_transfer_size = BUFFER_SIZE,
     };
 
-
-    // Pins dynamisch je nach gewählter Breite zuweisen
+    // Pins dynamisch je nach gewaehlter Breite zuweisen
     if (width == 16) {
         int pins_16[] = {SD0, SD1, SD2, SD3, SD4, SD5, SD6, SD7, SD8, SD9, SD10, SD11, SD12, SD13, SD14, SD15};
         for(int i=0; i<16; i++) unit_config.data_gpio_nums[i] = pins_16[i];
@@ -142,20 +205,57 @@ void update_parlio_settings(float msps, int width) {
         for(int i=0; i<8; i++) unit_config.data_gpio_nums[i] = pins_8[i];
     }
 
-    ESP_ERROR_CHECK(parlio_new_tx_unit(&unit_config, &tx_unit));
-    ESP_ERROR_CHECK(parlio_tx_unit_enable(tx_unit));
+    esp_err_t err = parlio_new_tx_unit(&unit_config, &tx_unit);
+    if (err != ESP_OK) { tx_unit = NULL; return err; }
+
+    err = parlio_tx_unit_enable(tx_unit);
+    if (err != ESP_OK) { parlio_del_tx_unit(tx_unit); tx_unit = NULL; return err; }
 
     // Starte permanenten Hardware-Loop
     parlio_transmit_config_t transmit_config = {
         .flags.loop_transmission = 1,
     };
 
-    ESP_LOGI(TAG, "Hardware Loop neugestartet: %d Bit, %.2f MSPS", width, msps);
-    // Buffergröße bleibt in Bits = BUFFER_SIZE * 8
-    ESP_ERROR_CHECK(parlio_tx_unit_transmit(tx_unit, buffer_a, (size_t)BUFFER_SIZE * 8, &transmit_config));
-    
+    // Buffergroesse bleibt in Bits = BUFFER_SIZE * 8
+    err = parlio_tx_unit_transmit(tx_unit, buffer_a, (size_t)BUFFER_SIZE * 8, &transmit_config);
+    if (err != ESP_OK) {
+        parlio_tx_unit_disable(tx_unit);
+        parlio_del_tx_unit(tx_unit);
+        tx_unit = NULL;
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Hardware Loop neugestartet: %d Bit, %.2f MSPS (Takt: %s, Teiler %.2f)",
+             width, msps, plan.name, plan.div);
+    return ESP_OK;
+}
+
+void update_parlio_settings(float msps, int width) {
+    xSemaphoreTake(config_mutex, portMAX_DELAY);
+
+    esp_err_t err = parlio_apply(msps, width);
+    if (err == ESP_OK) {
+        last_good_rate = msps;
+        last_good_width = width;
+    } else if (last_good_width == 0) {
+        // Allererster Start fehlgeschlagen: es gibt nichts, worauf man zurueckfallen koennte
+        ESP_ERROR_CHECK(err);
+    } else {
+        ESP_LOGE(TAG, "PARLIO %.3f MSPS / %d Bit fehlgeschlagen (%s) - behalte %.3f MSPS / %d Bit",
+                 msps, width, esp_err_to_name(err), last_good_rate, last_good_width);
+        // Soll-Werte wieder an den tatsaechlichen Zustand angleichen
+        current_rate = last_good_rate;
+        current_width = last_good_width;
+        if (tx_unit == NULL) {
+            // Die laufende Einheit war schon abgebaut -> letzte funktionierende Einstellung wiederherstellen
+            ESP_ERROR_CHECK(parlio_apply(last_good_rate, last_good_width));
+        }
+    }
+
     xSemaphoreGive(config_mutex);
 }
+
+/* END PARLIO-BLOCK */
 
 
 // --- TASKS ---
@@ -185,9 +285,14 @@ void control_task(void *pv) {
 
             if (strncmp(cmd, "rate ", 5) == 0) {
                 float val = atof(cmd + 5);
-                if (val > 0.1f && val <= 40.0f) { // Plausibilitätsprüfung!
+                // Plausibilitaetspruefung: Die Rate muss mit PLL_F160M oder XTAL erzeugbar sein,
+                // sonst bricht der PARLIO-Treiber ab (assert im Taktteiler).
+                if (val > 0.1f && parlio_plan_clock(parlio_msps_to_hz(val), NULL)) {
                     current_rate = val;
                     changed = true;
+                } else {
+                    ESP_LOGW(TAG, "rate %.3f MSPS nicht moeglich (erlaubt: %.3f ... %.1f MSPS) - ignoriert",
+                             val, parlio_min_msps(), PARLIO_MAX_MSPS);
                 }
             } else if (strncmp(cmd, "width ", 6) == 0) {
                 int w = atoi(cmd + 6);
