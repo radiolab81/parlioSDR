@@ -125,7 +125,7 @@ duc maxrate <MHz>          highest allowed PARLIO clock (default 10 MHz)
 Everything except `duc gain` takes effect with the next data connection.
 
 Output rate: `Fs_out = N · fs`, N = 4, 8, 12, … the smallest N for which `Fs_out` divides 160 MHz exactly and the carrier plus
-sideband stay below Nyquist (see the COHI-Player README for the table, the load estimates and the alias case). A warning
+sideband stay below Nyquist (see the COHI-Player-ESP32 README for the table, the load estimates and the alias case). A warning
 is logged when the signal can only be generated as an alias/image, or when the load is too high.
 Ring handling is the same as in the player: the write pointer is kept ~60..100 ms ahead of the DMA, underruns are counted
 (`duc status`) and never replay old data.
