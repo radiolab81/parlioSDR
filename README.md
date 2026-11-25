@@ -1,3 +1,7 @@
+> ## **New (experimental): software DUC instead of an FPGA.**
+> Branch [`feature/software-duc`](https://github.com/radiolab81/parlioSDR/tree/feature/software-duc) lets the ESP32-P4
+> do the up-conversion itself: I/Q in, mixed RF out via PARLIO. The default `raw` mode is unchanged.
+> 
 # parlioSDR  [ESP32 based Software-Defined-Radio TX]
 
 Baseband/RF over Ethernet - powered by ESP32-P4 PARLIO/Parallel IO Interface (DMA - driven).
