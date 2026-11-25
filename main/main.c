@@ -33,6 +33,9 @@
 #include "driver/gpio.h"
 #include "lwip/sockets.h"
 
+// Software-DUC (Erweiterung, siehe duc.h): Ersatz des FPGA im I/Q-Betrieb
+#include "duc.h"
+
 #define DATA_PORT 1234
 #define CTRL_PORT 5000
 #define BUFFER_SIZE (8 * 1024 * 1024) // 8 MB Ringbuffer für HF-Stream
@@ -258,6 +261,129 @@ void update_parlio_settings(float msps, int width) {
 /* END PARLIO-BLOCK */
 
 
+/* BEGIN SOFTWARE-DUC-BLOCK ----------------------------------------------------------
+ * Erweiterung: zwei Betriebsarten fuer den Datenport 1234.
+ *
+ *   SDR_MODE_RAW  (Standard) : unveraendertes bisheriges Verhalten. Der TCP-Strom (fertige
+ *                              HF-Samples oder I/Q fuer einen FPGA) geht 1:1 in buffer_a, der
+ *                              Hardware-Loop laeuft wie gehabt. Kein Zeichen davon wurde geaendert.
+ *   SDR_MODE_DUC             : der ESP32 uebernimmt die Rolle des FPGA. Er erwartet den I/Q-Strom
+ *                              der I/Q-Engine des COHIRADIAStreamer (In-Band-Befehle 'S'/'R'),
+ *                              mischt per Software hoch (duc.c) und treibt PARLIO selbst.
+ *
+ * Umschalten zur Laufzeit ueber den Steuerport 5000 ("mode duc" / "mode raw"), alle anderen
+ * Befehle ("rate", "width") verhalten sich im Modus raw exakt wie vorher.
+ * Beide Betriebsarten nutzen dieselbe PARLIO-Einheit (der P4 hat nur eine TX-Einheit) und
+ * denselben PSRAM-Puffer; beim Umschalten wird die jeweils andere Seite sauber abgebaut.
+ * Standardmodus beim Booten per Build-Flag aenderbar: -DPARLIOSDR_DEFAULT_MODE=SDR_MODE_DUC
+ */
+typedef enum { SDR_MODE_RAW = 0, SDR_MODE_DUC = 1 } sdr_mode_t;
+
+#ifndef PARLIOSDR_DEFAULT_MODE
+#define PARLIOSDR_DEFAULT_MODE SDR_MODE_RAW
+#endif
+
+// Wird nur vom Control-Task (und einmalig in app_main) geschrieben, vom Network-Task gelesen.
+static volatile sdr_mode_t g_mode = PARLIOSDR_DEFAULT_MODE;
+
+// Aktuelle Daten-Verbindung, damit der Control-Task sie bei einem Moduswechsel per shutdown()
+// beenden kann (recv() im Network-Task kehrt dann mit 0 zurueck). Der Mutex verhindert, dass
+// ein bereits geschlossener (und evtl. wiederverwendeter) Deskriptor angefasst wird.
+static int g_data_client = -1;
+static SemaphoreHandle_t g_client_mutex = NULL;
+
+static void publish_data_client(int fd) {
+    xSemaphoreTake(g_client_mutex, portMAX_DELAY);
+    g_data_client = fd;
+    xSemaphoreGive(g_client_mutex);
+}
+
+// Deskriptor zurueckziehen und schliessen (ersetzt das direkte close(client) des Network-Tasks)
+static void unpublish_and_close_data_client(int fd) {
+    xSemaphoreTake(g_client_mutex, portMAX_DELAY);
+    g_data_client = -1;
+    close(fd);
+    xSemaphoreGive(g_client_mutex);
+}
+
+static void kick_data_client(void) {
+    xSemaphoreTake(g_client_mutex, portMAX_DELAY);
+    if (g_data_client >= 0) shutdown(g_data_client, SHUT_RDWR);
+    xSemaphoreGive(g_client_mutex);
+}
+
+// Raw-Ausgang abbauen (PARLIO-Einheit freigeben), z.B. beim Wechsel nach DUC.
+// Der Zustand (current_rate/current_width, last_good_*) bleibt erhalten, damit der Rueckwechsel
+// mit update_parlio_settings() exakt die vorherige Einstellung wiederherstellt.
+static void raw_output_stop(void) {
+    xSemaphoreTake(config_mutex, portMAX_DELAY);
+    if (tx_unit != NULL) {
+        parlio_tx_unit_disable(tx_unit);
+        parlio_del_tx_unit(tx_unit);
+        tx_unit = NULL;
+    }
+    xSemaphoreGive(config_mutex);
+}
+
+// Nur vom Control-Task aufrufen.
+static void sdr_set_mode(sdr_mode_t m) {
+    if (m == g_mode) return;
+
+    if (m == SDR_MODE_DUC) {
+        ESP_LOGI(TAG, "Modus -> DUC (Software-Hochmischer)");
+        g_mode = SDR_MODE_DUC;
+        duc_set_enabled(true);
+        kick_data_client();            // laufende Raw-Verbindung beenden (Network-Task raeumt auf)
+        raw_output_stop();             // PARLIO-Einheit fuer den DUC freigeben
+    } else {
+        ESP_LOGI(TAG, "Modus -> RAW (Durchreichen)");
+        g_mode = SDR_MODE_RAW;
+        duc_set_enabled(false);        // DUC-Sitzung bricht ab
+        kick_data_client();
+        if (!duc_wait_idle(3000)) ESP_LOGW(TAG, "DUC-Sitzung beendet sich nicht - fahre trotzdem fort");
+        duc_release_output();
+        update_parlio_settings(current_rate, current_width);   // bisheriges Verhalten wiederherstellen
+    }
+}
+
+// Erweiterte Steuerbefehle. Rueckgabe true = Befehl wurde hier vollstaendig behandelt.
+// Im Modus raw wird fuer "rate"/"width" bewusst false geliefert -> der unveraenderte Altcode laeuft.
+static bool ext_command(int client, const char *cmd) {
+    char reply[512] = "";
+    bool handled = false;
+
+    if (strncmp(cmd, "mode", 4) == 0) {
+        handled = true;
+        const char *arg = cmd + 4;
+        while (*arg == ' ' || *arg == '\t') arg++;
+        if (strncmp(arg, "duc", 3) == 0)      { sdr_set_mode(SDR_MODE_DUC); }
+        else if (strncmp(arg, "raw", 3) == 0) { sdr_set_mode(SDR_MODE_RAW); }
+        snprintf(reply, sizeof(reply), "mode %s\n", g_mode == SDR_MODE_DUC ? "duc" : "raw");
+    } else if (strncmp(cmd, "duc", 3) == 0) {
+        handled = true;
+        duc_command(cmd, reply, sizeof(reply));
+    } else if (g_mode == SDR_MODE_DUC) {
+        // Klassische Befehle im DUC-Modus: der DUC bestimmt PARLIO-Takt und Breite selbst.
+        if (strncmp(cmd, "rate ", 5) == 0) {
+            handled = true;
+            float val = atof(cmd + 5);
+            duc_set_bus_rate_hint(val);   // = 2*fs; nur Rueckfall, falls kein 'R' im Strom kommt
+            ESP_LOGI(TAG, "DUC-Modus: rate %.3f MSPS (Busrate) als Hinweis gemerkt - PARLIO-Takt folgt aus der Samplerate", val);
+            snprintf(reply, sizeof(reply), "ok (duc: Hinweis, Takt wird aus fs abgeleitet)\n");
+        } else if (strncmp(cmd, "width ", 6) == 0) {
+            handled = true;
+            ESP_LOGI(TAG, "DUC-Modus: 'width' des Streamers (Busbreite) ignoriert - Ausgangsbreite per 'duc width 8|16'");
+            snprintf(reply, sizeof(reply), "ok (duc: ignoriert, siehe 'duc width')\n");
+        }
+    }
+
+    if (handled && reply[0]) send(client, reply, strlen(reply), 0);
+    return handled;
+}
+
+/* END SOFTWARE-DUC-BLOCK */
+
+
 // --- TASKS ---
 
 // Control Task für Plaintext-Befehle via Port 5000
@@ -282,6 +408,13 @@ void control_task(void *pv) {
         if (len > 0) {
             cmd[len] = '\0'; // String terminieren
             bool changed = false;
+
+            // Erweiterung: "mode ...", "duc ..." sowie "rate"/"width" im DUC-Modus.
+            // Im Modus raw liefert ext_command() false -> der Code unten laeuft unveraendert.
+            if (ext_command(client, cmd)) {
+                close(client);
+                continue;
+            }
 
             if (strncmp(cmd, "rate ", 5) == 0) {
                 float val = atof(cmd + 5);
@@ -330,6 +463,21 @@ void network_task(void *pv) {
         ESP_LOGI(TAG, "Warte auf TCP Daten-Verbindung (Port %d)...", DATA_PORT);
         int client = accept(s, NULL, NULL);
         if (client < 0) continue;
+
+        // --- Erweiterung: Software-DUC statt Durchreichen ---------------------------
+        // Im Modus DUC wird die Verbindung vollstaendig von duc.c bedient (I/Q-Strom auswerten,
+        // hochmischen, PARLIO treiben). Der Raw-Code darunter wird dann nicht durchlaufen und
+        // beruehrt buffer_a nicht. Der Deskriptor wird veroeffentlicht, damit ein Moduswechsel
+        // die Verbindung per shutdown() beenden kann; nach dem Veroeffentlichen wird der Modus
+        // noch einmal geprueft (Wechsel zwischen accept() und publish).
+        publish_data_client(client);
+        if (g_mode == SDR_MODE_DUC) {
+            duc_serve_client(client);
+            unpublish_and_close_data_client(client);
+            continue;
+        }
+        // ----------------------------------------------------------------------------
+
         ESP_LOGI(TAG, "Daten-Client verbunden. Stream beginnt...");
 
         while (1) {
@@ -343,6 +491,8 @@ void network_task(void *pv) {
     
             int n = recv(client, buffer_a + write_ptr, to_read, 0);
             if (n <= 0) break; // Client hat die Verbindung getrennt
+            // Erweiterung: wurde inzwischen auf DUC umgeschaltet, gehoert buffer_a dem DUC -> Daten nicht mehr schreiben
+            if (g_mode != SDR_MODE_RAW) break;
 
             // Cache-Sync für die neuen Daten
             uintptr_t sync_addr = ALIGN_DOWN((uintptr_t)(buffer_a + write_ptr), CACHE_ALIGN);
@@ -354,7 +504,7 @@ void network_task(void *pv) {
         }
 
         // --- DISCONNECT HANDLING: DEN CQ-PAPAGEI STUMMSCHALTEN ---
-        close(client);
+        unpublish_and_close_data_client(client);   // (frueher: close(client)); zusaetzlich Deskriptor zurueckziehen
         ESP_LOGW(TAG, "Client getrennt. Leere Ringbuffer...");
         // 1. Gesamten Puffer im RAM nullen
         memset(buffer_a, 0, BUFFER_SIZE);
@@ -377,10 +527,22 @@ void app_main(void) {
     esp_cache_msync(buffer_a, BUFFER_SIZE, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
     config_mutex = xSemaphoreCreateMutex();
+    g_client_mutex = xSemaphoreCreateMutex();   // Erweiterung (Moduswechsel, siehe SOFTWARE-DUC-BLOCK)
+
+    // Erweiterung: Software-DUC vorbereiten (reserviert keinen Speicher, nutzt buffer_a als Ring)
+    static const int duc_pins[16] = { SD0, SD1, SD2, SD3, SD4, SD5, SD6, SD7,
+                                      SD8, SD9, SD10, SD11, SD12, SD13, SD14, SD15 };
+    const duc_hw_t duc_hw = { .data_pins = duc_pins, .clk_pin = DAC_CLK_PIN,
+                              .ring_mem = buffer_a, .ring_mem_bytes = BUFFER_SIZE };
+    ESP_ERROR_CHECK(duc_init(&duc_hw));
 
     // 2. Ethernet & Parlio initialisieren
     init_ethernet();
-    update_parlio_settings(current_rate, current_width);
+    if (g_mode == SDR_MODE_RAW) {
+        update_parlio_settings(current_rate, current_width);   // Standard: wie bisher
+    } else {
+        duc_set_enabled(true);                                  // Boot direkt im DUC-Modus (Build-Flag)
+    }
 
     // 3. Network Task (Schreibt von Port 1234 direkt in den laufenden DMA-Ring)
     xTaskCreatePinnedToCore(network_task, "net", 8192, NULL, 5, NULL, 1);

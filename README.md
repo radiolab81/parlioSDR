@@ -57,6 +57,97 @@ Apps like COHIRADIAStreamer (https://github.com/radiolab81/COHIRADIAStreamer) wi
 
 The pin assignment of the header to the DAC (or ADC) is shown in esp32_p4_***.h files.
 
+## Two modes: pass-through or software DUC
+
+parlioSDR streams samples from Ethernet to a parallel DAC through the ESP32-P4 PARLIO peripheral.
+Since v2.0 it can run in two modes, switchable at runtime on the control port:
+
+| | `raw` (default) | `duc` |
+|---|---|---|
+| Input on port 1234 | finished RF samples, or I/Q for an FPGA | I/Q stream of the COHIRADIAStreamer *I/Q engine* |
+| Up-conversion | on the PC, or in the FPGA | on the ESP32 (half-band interpolation + LUT NCO) |
+| Extra hardware | none (or FPGA) | none |
+| Switch | `echo -n "mode raw" \| nc -w 1 <ip> 5000` | `echo -n "mode duc" \| nc -w 1 <ip> 5000` |
+
+`raw` behaves exactly as before. In `duc` mode the ESP32 replaces the FPGA: it decodes the in-band
+commands (`S` = shift, `R` = sample rate), interpolates, mixes up and drives the DAC itself.
+Tested with 8 to 14 bit DACs in both modes, at 250 kSps and 1.25 MSps input, and up to shortwave
+(for example a 6.09 MHz carrier at 10 MSPS using the first image, which needs a band-pass filter).
+See [Software DUC mode](#software-duc-mode-iq-in-mixed-rf-out---instead-of-an-fpga) for commands, limits and CPU load.
+
+## Software DUC mode (I/Q in, mixed RF out - instead of an FPGA)
+
+parlioSDR now has two operating modes for the data port (1234):
+
+| mode | what the ESP32 does | default |
+|---|---|---|
+| `raw` | unchanged behavior described above: the stream (finished RF samples, or I/Q for an FPGA) is passed 1:1 to the PARLIO DMA ring | yes |
+| `duc` | the ESP32 takes over the job of the FPGA: it expects the I/Q stream of the COHIRADIAStreamer *I/Q engine*, interpolates (half-band filters + ramp), mixes up with a LUT-NCO (`I·cos − Q·sin`) and drives PARLIO itself | no |
+
+The DSP core (`sdr_dsp.c`) and the rate planner (`sdr_plan.c`) are taken unchanged from the
+[COHI-Player-ESP32](https://github.com/radiolab81/COHI-Player-ESP32) (player from SD card), where they are proven on hardware.
+In `raw` mode none of the new code runs; the original code path is untouched.
+
+```
+echo -n "mode duc" | nc -w 1 192.168.1.71 5000      # switch to the software DUC
+echo -n "mode raw" | nc -w 1 192.168.1.71 5000      # back to pass-through (restores the last rate/width)
+echo -n "mode"     | nc -w 1 192.168.1.71 5000      # query
+```
+
+Select the **I/Q engine** in the streamer as you do for an FPGA. Nothing else changes on the PC side.
+The stream is the same as for the FPGA (16-bit little-endian words, tag in bit 15:14):
+
+| tag | meaning |
+|---|---|
+| `00` / `01` | I / Q sample, 14 bit two's complement (the DUC scales it back to 16 bit) |
+| `10` | command word: index 63 = start command (`'S'` shift, `'R'` input sample rate), index 0..3 = FTW bytes (LSB first) |
+| `11` | execute (`'E'`) |
+
+`S` and `R` carry an FTW relative to the 50 MHz FPGA clock (`DUC_FPGA_REF_HZ` in `duc_proto.h`, same as `calculate_ftw()` in the
+streamer). The DUC converts them back to Hz, so the **exact** input sample rate and shift come from the stream. A new `S` in
+the stream retunes without a gap (phase continuous); a new `R` re-plans the output clock (rest of the old signal is played out first).
+
+What the existing control commands mean in `duc` mode:
+
+* `rate x` (the streamer sends the bus rate = 2·fs, rounded to 0.1 MSPS) is only remembered as a fallback in case the stream contains no `R`.
+* `width x` (the streamer always sends 16 = bus width to the FPGA) is ignored. The width of the DAC on this board is set separately with `duc width`.
+
+Additional commands (every answer ends with a newline, so `nc` shows it):
+
+```
+duc status                 settings and, during a session, fs / shift / N / PARLIO clock / DSP load / lead / underruns / gain
+duc width 8|16             DAC width at the PARLIO pins (default 16, build default DUC_DEFAULT_WIDTH)
+duc offset on|off          offset binary (unsigned DACs / R2R ladders: on)
+duc gain auto|0.01..4.0    AGC (default, target 50 %) or fixed gain - takes effect live
+duc cores auto|1|2         mixer on one or two cores (auto: second core if estimated load >= 50 %, `DUC_AUTO_2CORE_PCT`)
+duc maxrate <MHz>          highest allowed PARLIO clock (default 10 MHz)
+```
+Everything except `duc gain` takes effect with the next data connection.
+
+Output rate: `Fs_out = N · fs`, N = 4, 8, 12, … the smallest N for which `Fs_out` divides 160 MHz exactly and the carrier plus
+sideband stay below Nyquist (see the COHI-Player README for the table, the load estimates and the alias case). A warning
+is logged when the signal can only be generated as an alias/image, or when the load is too high.
+Ring handling is the same as in the player: the write pointer is kept ~60..100 ms ahead of the DMA, underruns are counted
+(`duc status`) and never replay old data.
+
+Building: nothing to configure; `main/CMakeLists.txt` compiles `sdr_dsp.c` with `-O3` (the project default is `-Os`).
+To boot straight into the DUC: `-DPARLIOSDR_DEFAULT_MODE=SDR_MODE_DUC`. Notes:
+
+* `sdkconfig` of this project is set up for the DUC (tested): ESP32-P4 rev >= 3.01 at 400 MHz, PSRAM enabled (80 MHz),
+  `-O2` (`COMPILER_OPTIMIZATION_PERF`), `CONFIG_FREERTOS_HZ=1000`, `CONFIG_LWIP_TCP_WND_DEFAULT=16384` and
+  `CONFIG_LWIP_TCP_RECVMBOX_SIZE=16` (must cover window / MSS = 16384 / 1440 = 12 segments). `./check_settings.sh` lists them.
+  The larger TCP window is needed because the DUC applies back-pressure (the ring is only filled ~100 ms ahead); with 5760 bytes
+  a 1.25 MSps I/Q stream (5 MB/s) stutters, 250 kSps does not. Raw mode is unaffected by these values (tested).
+* No SD card is involved, so GPIO45 etc. are not special here (see COHI-Player if you combine both projects).
+
+Host tests (no hardware): `test/host_duc.c` builds the stream exactly like `DspWorker::run_IQ_engine`, checks the parser with
+random chunking (1 byte … 1.5 kB), error cases, FTW conversion, and runs parser → planner → DSP; `test/analyze_duc.py` checks the spectrum.
+
+```
+gcc -O2 -I main -o test/host_duc test/host_duc.c main/duc_proto.c main/sdr_dsp.c main/sdr_plan.c -lm
+./test/host_duc /tmp/duc_out.bin && python3 test/analyze_duc.py /tmp/duc_out.bin
+```
+
 ## Using with GNU Radio
 
 parlioSDR shares its DNA with our sister-project smiSDR (for the Raspberry Pi), so see https://github.com/radiolab81/smisdr#using-with-gnu-radio
