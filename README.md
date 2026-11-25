@@ -138,7 +138,7 @@ To boot straight into the DUC: `-DPARLIOSDR_DEFAULT_MODE=SDR_MODE_DUC`. Notes:
   `CONFIG_LWIP_TCP_RECVMBOX_SIZE=16` (must cover window / MSS = 16384 / 1440 = 12 segments). `./check_settings.sh` lists them.
   The larger TCP window is needed because the DUC applies back-pressure (the ring is only filled ~100 ms ahead); with 5760 bytes
   a 1.25 MSps I/Q stream (5 MB/s) stutters, 250 kSps does not. Raw mode is unaffected by these values (tested).
-* No SD card is involved, so GPIO45 etc. are not special here (see COHI-Player if you combine both projects).
+* No SD card is involved, so GPIO45 etc. are not special here (see COHI-Player-ESP32 if you combine both projects).
 
 Host tests (no hardware): `test/host_duc.c` builds the stream exactly like `DspWorker::run_IQ_engine`, checks the parser with
 random chunking (1 byte … 1.5 kB), error cases, FTW conversion, and runs parser → planner → DSP; `test/analyze_duc.py` checks the spectrum.
