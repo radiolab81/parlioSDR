@@ -2,7 +2,7 @@
 
 Baseband/RF over Ethernet - powered by ESP32-P4 PARLIO/Parallel IO Interface (DMA - driven).
 
-![main01](https://github.com/radiolab81/parlioSDR/blob/main/www/schematic.jpg)
+![main01](/www/schematic.jpg)
 
 For high-speed connection of a DAC/ADC in SDR applications, some new MCUs from espressif, like ESP32-P4, offers the PARLIO/Parallel IO Interface.
 https://docs.espressif.com/projects/esp-idf/en/stable/esp32p4/api-reference/peripherals/parlio/index.html
