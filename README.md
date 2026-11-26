@@ -1,4 +1,4 @@
-# parlioSDR  [ESP32 based Software-Defined-Radio TX]
+# parlioSDR V2 [ESP32 based Software-Defined-Radio TX, with optional software-DUC]
 
 Baseband/RF over Ethernet - powered by ESP32-P4 PARLIO/Parallel IO Interface (DMA - driven).
 
