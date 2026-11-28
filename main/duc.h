@@ -16,8 +16,9 @@
  *
  * Umschalten (Steuerport 5000, siehe main.c):
  *   mode duc | mode raw | mode        (Status)
- *   duc status | duc width 8|16 | duc offset on|off | duc gain auto|<g> |
+ *   duc status | duc offset on|off | duc gain auto|<g> |
  *   duc cores auto|1|2 | duc maxrate <MHz>
+ * Die DAC-Breite ist NICHT umschaltbar, sie steht beim Kompilieren fest (PARLIOSDR_DAC_BITS).
  */
 #pragma once
 #include <stdint.h>
@@ -29,15 +30,12 @@
 extern "C" {
 #endif
 
-/* Ausgangsbreite des DUC, solange nichts anderes per `duc width` gesetzt wurde.
- * Bewusst getrennt vom `width`-Befehl des Streamers: die I/Q-Engine sendet immer "width 16"
- * (Busbreite zum FPGA), das sagt nichts ueber den am ESP32 angeschlossenen DAC. */
-#ifndef DUC_DEFAULT_WIDTH
-#define DUC_DEFAULT_WIDTH 16
-#endif
-
 typedef struct {
     const int *data_pins;      /* 16 Eintraege SD0..SD15 (aus dem Board-Header)   */
+    int        dac_bits;       /* fest verbauter DAC: 8, 10, 12, 14 oder 16 Bit, rechtsbuendig an SD0..SD(n-1)
+                                * (Kompilierzeit, PARLIOSDR_DAC_BITS in main.c). Der Streamer sendet im I/Q-Modus
+                                * immer "width 16" und 14-Bit-Nutzdaten - das sagt nichts ueber diesen DAC.   */
+    bool       dac_offset_binary; /* Startwert fuer "duc offset" (PARLIOSDR_DAC_OFFSET_BINARY)            */
     int        clk_pin;        /* DAC_CLK_PIN                                      */
     uint8_t   *ring_mem;       /* DMA-faehiger PSRAM-Puffer (64-Byte ausgerichtet) */
     size_t     ring_mem_bytes;

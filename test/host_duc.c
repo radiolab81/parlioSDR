@@ -158,6 +158,40 @@ int main(int argc, char **argv)
         free(out); free(d);
     }
 
+    /* ---- Bit-Tiefen 10/12/14/16: rechtsbuendig (Streamer-Konvention), Zweierkomplement und Offset-Binary ---- */
+    {
+        sdr_plan_t pl; sdr_plan_rate(fs, shift, 10000000u, &pl);
+        static const int depths[] = { 10, 12, 14, 16 };
+        for (size_t di = 0; di < sizeof depths / sizeof *depths; di++) {
+            const int n = depths[di];
+            for (int ob = 0; ob < 2; ob++) {
+                sdr_dsp_t *d = calloc(1, sizeof *d); d->agc = false; d->manual_gain = 0.9f;
+                sdr_dsp_cfg_t c = { .bits = n, .offset_binary = ob, .hold = pl.n / 4,
+                                    .phase_inc = sdr_phase_inc(shift, pl.fs_out), .fast = false };
+                sdr_dsp_init(d, &c);
+                size_t cnt = 16384 * pl.n; uint16_t *o16 = malloc(cnt * 2); size_t no = 0;
+                for (size_t done = 0; done < 16384; ) { size_t k = 16384 - done > 1024 ? 1024 : 16384 - done;
+                    no += sdr_dsp_process(d, ref_out + 2 * done, k, o16 + no); done += k; }
+                int32_t mn = 1 << 30, mx = -(1 << 30); double sum = 0;
+                for (size_t i = 2000; i < no; i++) {
+                    int32_t v = ob ? (int32_t)o16[i] - (1 << (n - 1)) : (int16_t)o16[i];   /* Zweierkomplement: vorzeichenerweitert */
+                    if (ob && o16[i] >= (1u << n)) { CHECK(0, "%d Bit offset: Wert %u ausserhalb 0..2^n-1", n, o16[i]); break; }
+                    if (v < mn) mn = v;
+                    if (v > mx) mx = v;
+                    sum += v;
+                }
+                const int32_t lim = 1 << (n - 1);
+                CHECK(mx <= lim - 1 && mn >= -lim, "%d Bit %s: Bereich %d..%d ausserhalb +-2^%d", n, ob ? "offset" : "signed", mn, mx, n - 1);
+                CHECK(mx > lim / 4 && mn < -lim / 4, "%d Bit %s: zu wenig Aussteuerung (%d..%d)", n, ob ? "offset" : "signed", mn, mx);
+                CHECK(fabs(sum / (double)(no - 2000)) < lim * 0.02, "%d Bit %s: Mittelwert verschoben", n, ob ? "offset" : "signed");
+                CHECK(sdr_silence_code(n, ob) == (ob ? (uint16_t)(1u << (n - 1)) : 0), "Stille-Code %d Bit", n);
+                printf("%2d Bit %-6s: %6d .. %6d (+-%d)\n", n, ob ? "offset" : "signed", mn, mx, lim);
+                free(o16); free(d);
+            }
+        }
+        CHECK(sdr_silence_code(8, true) == 0x80 && sdr_silence_code(16, true) == 0x8000, "Stille-Code 8/16 Bit unveraendert");
+    }
+
     printf(fails ? "\n%d FEHLER\n" : "\nalle Tests OK\n", fails);
     return fails ? 1 : 0;
 }

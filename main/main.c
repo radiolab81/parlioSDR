@@ -5,6 +5,27 @@
 // #include "esp32_p4_wifi6_dev_kit.h"
 // #include "esp32_p4_eth.h"
 
+// --- Software-DUC: fest verbauter DAC (Kompilierzeit) ------------------------------------------
+// Aufloesung des am ESP32 angeschlossenen DAC: 8, 10, 12, 14 oder 16 Bit. Der DAC haengt rechtsbuendig
+// an SD0..SD(n-1), z.B. ein 10-Bit-DAC an SD0..SD9, ein 14-Bit-DAC an SD0..SD13 (wie der COHIRADIAStreamer
+// es im "raw"-Betrieb erwartet). Nur der Software-DUC wertet das aus; der Modus "raw" ist davon unabhaengig.
+#define PARLIOSDR_DAC_BITS 8
+
+#ifndef PARLIOSDR_DAC_BITS
+#define PARLIOSDR_DAC_BITS 16
+#endif
+
+// 1 = DAC erwartet Offset-Binary (R2R-Leiter, unsigned), 0 = Zweierkomplement (Startwert, per "duc offset" aenderbar)
+#define PARLIOSDR_DAC_OFFSET_BINARY 1
+
+#ifndef PARLIOSDR_DAC_OFFSET_BINARY
+#define PARLIOSDR_DAC_OFFSET_BINARY 0
+#endif
+_Static_assert(PARLIOSDR_DAC_BITS == 8 || PARLIOSDR_DAC_BITS == 10 || PARLIOSDR_DAC_BITS == 12 ||
+               PARLIOSDR_DAC_BITS == 14 || PARLIOSDR_DAC_BITS == 16, "PARLIOSDR_DAC_BITS muss 8, 10, 12, 14 oder 16 sein");
+
+
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -41,8 +62,6 @@
 #define BUFFER_SIZE (8 * 1024 * 1024) // 8 MB Ringbuffer für HF-Stream
 
 #define TAG "PARLIOSDR"
-
-//#define DAC_16BIT_MODE
 
 #define CACHE_ALIGN 64
 #define ALIGN_UP(size, align) (((size) + (align) - 1) & ~((align) - 1))
@@ -372,8 +391,8 @@ static bool ext_command(int client, const char *cmd) {
             snprintf(reply, sizeof(reply), "ok (duc: Hinweis, Takt wird aus fs abgeleitet)\n");
         } else if (strncmp(cmd, "width ", 6) == 0) {
             handled = true;
-            ESP_LOGI(TAG, "DUC-Modus: 'width' des Streamers (Busbreite) ignoriert - Ausgangsbreite per 'duc width 8|16'");
-            snprintf(reply, sizeof(reply), "ok (duc: ignoriert, siehe 'duc width')\n");
+            ESP_LOGI(TAG, "DUC-Modus: 'width' des Streamers (Busbreite) ignoriert - DAC-Breite ist fest (PARLIOSDR_DAC_BITS)");
+            snprintf(reply, sizeof(reply), "ok (duc: ignoriert, DAC-Breite fest per PARLIOSDR_DAC_BITS)\n");
         }
     }
 
@@ -533,6 +552,7 @@ void app_main(void) {
     static const int duc_pins[16] = { SD0, SD1, SD2, SD3, SD4, SD5, SD6, SD7,
                                       SD8, SD9, SD10, SD11, SD12, SD13, SD14, SD15 };
     const duc_hw_t duc_hw = { .data_pins = duc_pins, .clk_pin = DAC_CLK_PIN,
+                              .dac_bits = PARLIOSDR_DAC_BITS, .dac_offset_binary = PARLIOSDR_DAC_OFFSET_BINARY,
                               .ring_mem = buffer_a, .ring_mem_bytes = BUFFER_SIZE };
     ESP_ERROR_CHECK(duc_init(&duc_hw));
 

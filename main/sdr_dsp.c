@@ -92,7 +92,7 @@ void sdr_dsp_set_phase_inc(sdr_dsp_t *d, uint32_t inc) { d->cfg.phase_inc = inc;
 uint16_t sdr_silence_code(int bits, bool ob)
 {
     if (!ob) return 0;
-    return bits == 8 ? 0x80 : 0x8000;
+    return (uint16_t)(1u << (bits - 1));          /* Mitte: 0x80 (8 Bit), 0x200..0x2000 (10..14 Bit), 0x8000 (16 Bit) */
 }
 
 static inline int32_t clampi(int32_t v, int32_t lim)
@@ -275,7 +275,7 @@ size_t SDR_HOT sdr_dsp_mix(const sdr_dsp_t *d, size_t first, size_t count, void 
              d->cfg.offset_binary ? 0x80 : 0, (uint8_t *)out);
     else
         mix16(bb, count, M, d->recipM, inc, ph, pI, pQ, d->shift,
-              d->cfg.offset_binary ? 0x8000 : 0, (uint16_t *)out);
+              d->cfg.offset_binary ? (uint16_t)(1u << (d->cfg.bits - 1)) : 0, (uint16_t *)out);
     return count * (size_t)M;
 }
 

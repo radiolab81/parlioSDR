@@ -88,7 +88,7 @@ typedef struct {
 } msg_t;
 
 typedef struct {
-    int      width;       /* DUC-Ausgangsbreite 8 | 16        */
+    int      width;       /* DAC-Aufloesung 8 | 10 | 12 | 14 | 16 (rechtsbuendig, wie der Streamer) */
     bool     offset;      /* Offset-Binary (unsigned DAC)     */
     bool     agc;
     float    gain;        /* manueller Gain                   */
@@ -101,7 +101,9 @@ typedef struct {
     uint8_t  *ring;
     size_t    ring_bytes;
     uint64_t  ring_samples;
-    int       bits, bps;
+    int       bits;                     /* DAC-Aufloesung (8, 10, 12, 14, 16)                 */
+    int       width;                    /* PARLIO-Busbreite: 8 bei 8 Bit, sonst 16            */
+    int       bps;                      /* Bytes pro Sample im Ring (width / 8)               */
     uint32_t  fs_out;
     uint16_t  silence;
     bool      dma_started;
@@ -129,7 +131,7 @@ static volatile bool s_stop;             /* aktuelle Sitzung beenden (Fehler ode
 static volatile bool s_active;           /* Sitzung laeuft                                     */
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
-static duc_set_t s_set = { DUC_DEFAULT_WIDTH, false, true, 0.5f, DEFAULT_MAXRATE_HZ, 0 };
+static duc_set_t s_set = { 16, false, true, 0.5f, DEFAULT_MAXRATE_HZ, 0 };   /* width/offset kommen aus duc_hw_t (duc_init) */
 static float     s_bus_hint_msps;
 
 static out_t o;                          /* PARLIO-Ausgang; bleibt nach einer Sitzung (Stille) bestehen */
@@ -190,7 +192,7 @@ static void ring_silence(uint64_t first, uint64_t n)
         uint64_t idx = first % o.ring_samples;
         uint64_t seg = o.ring_samples - idx;
         if (seg > n) seg = n;
-        fill_code(o.ring + idx * o.bps, seg, o.bits, o.silence);
+        fill_code(o.ring + idx * o.bps, seg, o.width, o.silence);
         msync_c2m(o.ring + idx * o.bps, seg * o.bps);
         first += seg; n -= seg;
     }
@@ -215,7 +217,8 @@ static esp_err_t out_open(const sdr_plan_t *pl, int bits, bool offset_binary)
     }
     out_close();
     o.bits = bits;
-    o.bps = bits / 8;
+    o.width = bits == 8 ? 8 : 16;      /* 10/12/14 Bit liegen rechtsbuendig im 16-Bit-Bus (D0..D(n-1)) */
+    o.bps = o.width / 8;
     o.fs_out = pl->fs_out;
     o.silence = sdr_silence_code(bits, offset_binary);
 
@@ -241,7 +244,7 @@ static esp_err_t out_open(const sdr_plan_t *pl, int bits, bool offset_binary)
 
     parlio_tx_unit_config_t cfg = {
         .clk_src = src,
-        .data_width = (uint32_t)bits,
+        .data_width = (uint32_t)o.width,
         .clk_in_gpio_num = -1,
         .clk_out_gpio_num = s_hw.clk_pin,
         .valid_gpio_num = -1,
@@ -249,7 +252,7 @@ static esp_err_t out_open(const sdr_plan_t *pl, int bits, bool offset_binary)
         .trans_queue_depth = 2,
         .max_transfer_size = o.ring_bytes,
     };
-    for (int i = 0; i < 16; i++) cfg.data_gpio_nums[i] = (i < bits) ? s_hw.data_pins[i] : -1;
+    for (int i = 0; i < 16; i++) cfg.data_gpio_nums[i] = (i < bits) ? s_hw.data_pins[i] : -1;   /* nur SD0..SD(n-1): ein 10-Bit-DAC belegt nur SD0..SD9, die Pins darueber bleiben frei */
 
     esp_err_t e = parlio_new_tx_unit(&cfg, &o.unit);
     if (e != ESP_OK) { ESP_LOGE(TAG, "parlio_new_tx_unit: %s", esp_err_to_name(e)); o.unit = NULL; return e; }
@@ -257,6 +260,8 @@ static esp_err_t out_open(const sdr_plan_t *pl, int bits, bool offset_binary)
     if (e != ESP_OK) { ESP_LOGE(TAG, "parlio enable: %s", esp_err_to_name(e)); out_close(); return e; }
     ESP_LOGI(TAG, "PARLIO: %d Bit, %.3f MSPS (Takt: %s, Teiler %.2f), Ring %u KiB",
              bits, pl->fs_out / 1e6, cname, div, (unsigned)(o.ring_bytes / 1024));
+    if (bits != 8 && bits != 16)
+        ESP_LOGI(TAG, "%d-Bit-DAC rechtsbuendig an D0..D%d (16-Bit-Bus, wie im COHIRADIAStreamer)", bits, bits - 1);
     return ESP_OK;
 }
 
@@ -379,7 +384,7 @@ static bool apply_cfg(dctx_t *c, uint32_t fs, double shift)
         S.dsp->agc = S.cfg.agc; S.dsp->manual_gain = S.cfg.gain;
         sdr_dsp_init(S.dsp, &dc);
         c->valid = true; c->fs = fs; c->n = pl.n;
-        c->hold = dc.hold; c->bps = bits / 8;
+        c->hold = dc.hold; c->bps = (bits == 8) ? 1 : 2;
     } else {
         /* gleiche Rate, nur anderer Shift: nahtlos, Phase und Filterzustand bleiben erhalten */
         sdr_dsp_set_phase_inc(S.dsp, sdr_phase_inc(shift, pl.fs_out));
@@ -387,7 +392,7 @@ static bool apply_cfg(dctx_t *c, uint32_t fs, double shift)
 
     c->B = SDR_BLOCK_MAX;
     while (c->B > 16 && (size_t)c->B * pl.n > 8192) c->B >>= 1;
-    size_t need = (size_t)c->B * pl.n * (bits / 8);
+    size_t need = (size_t)c->B * pl.n * (size_t)((bits == 8) ? 1 : 2);
     if (need > S.stage_bytes) {
         free(S.stage);
         S.stage = heap_caps_aligned_alloc(64, need, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -680,7 +685,11 @@ done:
 esp_err_t duc_init(const duc_hw_t *hw)
 {
     if (!hw || !hw->data_pins || !hw->ring_mem || hw->ring_mem_bytes < RING_MIN_BYTES) return ESP_ERR_INVALID_ARG;
+    if (hw->dac_bits != 8 && hw->dac_bits != 10 && hw->dac_bits != 12 && hw->dac_bits != 14 && hw->dac_bits != 16)
+        return ESP_ERR_INVALID_ARG;
     s_hw = *hw;
+    s_set.width = hw->dac_bits;                /* fest: nur der Kompilierwert, keine Umschaltung zur Laufzeit */
+    s_set.offset = hw->dac_offset_binary;
     sdr_dsp_global_init();          /* LUT + Filterkoeffizienten (ca. 20 KB, einmalig) */
     s_inited = true;
     return ESP_OK;
@@ -717,7 +726,7 @@ static void status_text(char *reply, size_t n)
     portENTER_CRITICAL(&s_mux);
     st = s_st; set = s_set; hint = s_bus_hint_msps;
     portEXIT_CRITICAL(&s_mux);
-    int w = snprintf(reply, n, "duc: %s, Sitzung %s | Einstellungen: %d Bit, %s, %s %.2f, cores %s, maxrate %.1f MHz, rate-hint %.1f MSPS\n",
+    int w = snprintf(reply, n, "duc: %s, Sitzung %s | Einstellungen: DAC %d Bit (fest), %s, %s %.2f, cores %s, maxrate %.1f MHz, rate-hint %.1f MSPS\n",
                      s_enabled ? "aktiv" : "aus", s_active ? "laeuft" : "keine",
                      set.width, set.offset ? "offset-binary" : "signed", set.agc ? "AGC" : "gain", set.gain,
                      set.cores == 0 ? "auto" : set.cores == 1 ? "1" : "2", set.maxrate / 1e6, hint);
@@ -742,9 +751,8 @@ void duc_command(const char *line, char *reply, size_t n)
 
     if (!t1 || strcmp(t1, "status") == 0) {
         status_text(reply, n);
-    } else if (strcmp(t1, "width") == 0 && t2 && (strcmp(t2, "8") == 0 || strcmp(t2, "16") == 0)) {
-        s_set.width = atoi(t2);
-        snprintf(reply, n, "%s", ok);
+    } else if (strcmp(t1, "bits") == 0 || strcmp(t1, "width") == 0) {
+        snprintf(reply, n, "DAC-Breite ist fest: %d Bit (PARLIOSDR_DAC_BITS beim Kompilieren)\n", s_set.width);
     } else if (strcmp(t1, "offset") == 0 && t2 && (strcmp(t2, "on") == 0 || strcmp(t2, "off") == 0)) {
         s_set.offset = strcmp(t2, "on") == 0;
         snprintf(reply, n, "%s", ok);
@@ -766,6 +774,6 @@ void duc_command(const char *line, char *reply, size_t n)
         s_set.maxrate = (uint32_t)(mhz * 1e6 + 0.5);
         snprintf(reply, n, "%s", ok);
     } else {
-        snprintf(reply, n, "duc status | width 8|16 | offset on|off | gain auto|<0.01..4> | cores auto|1|2 | maxrate <MHz>\n");
+        snprintf(reply, n, "duc status | offset on|off | gain auto|<0.01..4> | cores auto|1|2 | maxrate <MHz>\n");
     }
 }

@@ -110,19 +110,31 @@ the stream retunes without a gap (phase continuous); a new `R` re-plans the outp
 What the existing control commands mean in `duc` mode:
 
 * `rate x` (the streamer sends the bus rate = 2·fs, rounded to 0.1 MSPS) is only remembered as a fallback in case the stream contains no `R`.
-* `width x` (the streamer always sends 16 = bus width to the FPGA) is ignored. The width of the DAC on this board is set separately with `duc width`.
+* `width x` (the streamer always sends 16 = bus width to the FPGA) is ignored. The resolution of the DAC is fixed at compile time (`PARLIOSDR_DAC_BITS`, see below).
+
+**DAC resolution is fixed at compile time.** The DAC is wired permanently to the ESP32, so its resolution is set in `main/main.c`:
+
+```c
+#define PARLIOSDR_DAC_BITS 12            // 8, 10, 12, 14 or 16 
+#define PARLIOSDR_DAC_OFFSET_BINARY 0    // 1 = unsigned/offset-binary DAC (R2R ladder), 0 = two's complement
+```
+
+An n-bit DAC is wired **right-aligned** to `SD0 .. SD(n-1)` (a 10 bit DAC uses SD0..SD9, a 14 bit DAC SD0..SD13), the same way the
+COHIRADIAStreamer expects it in `raw` mode, so the same boards work in both modes. In `duc` mode only these n pins (and the clock pin) are
+driven; the pins above stay free. 8 bit uses an 8-bit bus. The I/Q input stream always carries 14-bit samples and `width 16`
+(that describes the FPGA bus, not the DAC), so the DAC resolution is not taken from the stream.
+`duc offset on|off` can still override the code format at runtime.
 
 Additional commands (every answer ends with a newline, so `nc` shows it):
 
 ```
 duc status                 settings and, during a session, fs / shift / N / PARLIO clock / DSP load / lead / underruns / gain
-duc width 8|16             DAC width at the PARLIO pins (default 16, build default DUC_DEFAULT_WIDTH)
 duc offset on|off          offset binary (unsigned DACs / R2R ladders: on)
 duc gain auto|0.01..4.0    AGC (default, target 50 %) or fixed gain - takes effect live
 duc cores auto|1|2         mixer on one or two cores (auto: second core if estimated load >= 50 %, `DUC_AUTO_2CORE_PCT`)
 duc maxrate <MHz>          highest allowed PARLIO clock (default 10 MHz)
 ```
-Everything except `duc gain` takes effect with the next data connection.
+Everything except `duc gain` takes effect with the next data connection. (`duc bits` / `duc width` only report the compile-time value.)
 
 Output rate: `Fs_out = N · fs`, N = 4, 8, 12, … the smallest N for which `Fs_out` divides 160 MHz exactly and the carrier plus
 sideband stay below Nyquist (see the COHI-Player-ESP32 README for the table, the load estimates and the alias case). A warning

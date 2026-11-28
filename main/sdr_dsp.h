@@ -28,8 +28,10 @@ extern "C" {
 #define SDR_AGC_TARGET  0.5f                /* AGC-Ziel: Peak = 50 % Vollaussteuerung  */
 
 typedef struct {
-    int      bits;            /* 8 oder 16                                     */
-    bool     offset_binary;   /* true: Offset-Binary (Mitte = 0x80 / 0x8000)   */
+    int      bits;            /* DAC-Aufloesung 8, 10, 12, 14 oder 16. Ausgabe bei 8 Bit als uint8_t, sonst als
+                               * uint16_t, RECHTSBUENDIG (Bit 0 = LSB des DAC), wie im COHIRADIAStreamer.
+                               * Hinweis: shift = 30 - bits ergibt fuer jede Breite den vollen Aussteuerbereich. */
+    bool     offset_binary;   /* true: Offset-Binary (Mitte = 1 << (bits-1)); false: Zweierkomplement (vorzeichenerweitert in 16 Bit) */
     int      hold;            /* Rampenlaenge: N/4 (HQ: 2 Halbbaender) bzw. N/2 (fast: 1 Halbband) */
     uint32_t phase_inc;       /* NCO: shift_hz / fs_out * 2^32                 */
     bool     fast;            /* nur 1 Halbband (fs >= SDR_FAST_FS_HZ; Bilder liegen >= 1,5*fs entfernt) */
